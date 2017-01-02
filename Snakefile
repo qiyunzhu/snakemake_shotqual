@@ -30,12 +30,16 @@ if "HUMANN2_ENV" in config["ENVS"]:
     HUMANN2_ENV = config["ENVS"]["HUMANN2_ENV"]
 if "METAPHLAN_ENV" in config["ENVS"]:
     METAPHLAN_ENV = config["ENVS"]["METAPHLAN_ENV"]
+if "KRAKEN_ENV" in config["ENVS"]:
+    KRAKEN_ENV = config["ENVS"]["KRAKEN_ENV"]
 
 # Host DB specified in config file accessed in params section of rule
 
 # Trimmomatic parameters accessed in params section of rule
 
 # HUMAnN2 parameters accessed in params section of rule
+
+# Kraken parameters accessed in params section of rule
 
 
 #### Top-level rules: rules to execute a subset of the pipeline
@@ -57,6 +61,9 @@ rule all:
         - humann2_combine_tables
         - humann2_remove_unmapped
         - humann2_split_stratified_tables
+    And Kraken:
+        - kraken_sample_pe
+        - kraken_combine_reports
     """
     input:
         expand( # fastqc zip and html for raw PE data
@@ -116,6 +123,17 @@ rule all:
                norm = config['PARAMS']['HUMANN2']['NORMS'],
                run = RUN,
                mapped=['all','mapped']),
+        expand(# Kraken read-to-genome map
+               "data/{sample}/{run}/kraken/{sample}_map.tsv.gz",
+               sample = SAMPLES_PE,
+               run = RUN) +
+        expand(# Kraken hierarchical taxonomic profile
+               "data/{sample}/{run}/kraken/{sample}_report.txt",
+               sample = SAMPLES_PE,
+               run = RUN),
+        expand(# Kraken combined taxonomic profile
+               "data/combined_analysis/{run}/kraken/combined_profile.tsv",
+               run = RUN),
         expand( # MultiQC for just this run
             "data/multiQC/{run}/multiqc_report.html",
             run = RUN
@@ -230,6 +248,24 @@ rule humann2:
                run = RUN,
                mapped=['all','mapped'])
 
+rule kraken:
+    """
+    Rule to do Kraken taxonomic profiling
+        - kraken_sample_pe
+        - kraken_combine_reports
+    """
+    input:
+        expand(# read-to-genome map
+               "data/{sample}/{run}/kraken/{sample}_map.tsv.gz",
+               sample = SAMPLES_PE,
+               run = RUN) +
+        expand(# hierarchical taxonomic profile
+               "data/{sample}/{run}/kraken/{sample}_report.txt",
+               sample = SAMPLES_PE,
+               run = RUN),
+        expand(# combined taxonomic profile
+               "data/combined_analysis/{run}/kraken/combined_profile.tsv",
+               run = RUN)
 
 
 rule raw_fastqc:
@@ -743,6 +779,7 @@ rule humann2_sample_pe:
                   scp {temp_dir}/{wildcards.sample}/{wildcards.sample}_pathabundance.biom {output.pathabundance}
                   """)
 
+
 rule humann2_renorm_tables:
     """
     Renormalizes HUMAnN2 per-sample tables, per recommendation in the HUMAnN2
@@ -913,3 +950,94 @@ rule humann2_split_stratified_tables:
               """)
 
 
+rule kraken_sample_pe:
+    """
+    Runs Kraken using general defaults.
+    """
+    input:
+        paired_f = "data/{sample}/{run}/host_filtered/{sample}_R1.trimmed.host_filtered.fq.gz",
+        paired_r = "data/{sample}/{run}/host_filtered/{sample}_R2.trimmed.host_filtered.fq.gz",
+        unpaired_f = "data/{sample}/{run}/host_filtered/{sample}_U1.trimmed.host_filtered.fq.gz",
+        unpaired_r = "data/{sample}/{run}/host_filtered/{sample}_U2.trimmed.host_filtered.fq.gz"
+    output:
+        map = "data/{sample}/{run}/kraken/{sample}_map.tsv.gz",
+        report = "data/{sample}/{run}/kraken/{sample}_report.txt"
+    params:
+        kraken_db = config['PARAMS']['KRAKEN']["KRAKEN_DB"]
+    threads:
+        12
+    log:
+        "logs/{run}/analysis/kraken_sample_pe_{sample}.log"
+    benchmark:
+        "benchmarks/{run}/analysis/kraken_sample_pe_{sample}.json"
+    run:
+        with tempfile.TemporaryDirectory(dir=TMP_DIR_ROOT) as temp_dir:
+            shell("""
+                  set +u; {KRAKEN_ENV}; set -u
+
+                  kraken {input.paired_f} {input.paired_r} \
+                    --db {params.kraken_db} \
+                    --paired \
+                    --fastq-input \
+                    --gzip-compressed \
+                    --only-classified-output \
+                    --threads {threads} \
+                    1> {temp_dir}/{wildcards.sample}_map.tsv \
+                    2> {log}
+
+                  kraken {input.unpaired_f} {input.unpaired_r} \
+                    --db {params.kraken_db} \
+                    --fastq-input \
+                    --gzip-compressed \
+                    --only-classified-output \
+                    --threads {threads} \
+                    1>> {temp_dir}/{wildcards.sample}_map.tsv \
+                    2>> {log}
+
+                  kraken-report {temp_dir}/{wildcards.sample}_map.tsv \
+                    --db {params.kraken_db} \
+                    1> {temp_dir}/{wildcards.sample}_report.txt \
+                    2>> {log}
+
+                  pigz {temp_dir}/{wildcards.sample}_map.tsv \
+                    -p {threads} \
+                    2>> {log}
+
+                  scp {temp_dir}/{wildcards.sample}_map.tsv.gz {output.map}
+                  scp {temp_dir}/{wildcards.sample}_report.txt {output.report}
+                  """)
+
+
+rule kraken_combine_reports:
+    """
+    Combines the per-sample taxonomic profiles into a single run-wide table. 
+    """
+    input:
+        lambda wildcards: expand("data/{sample}/{run}/kraken/{sample}_map.tsv.gz",
+               sample=SAMPLES_PE, run=RUN)
+    output:
+        report = "data/combined_analysis/{run}/kraken/combined_profile.tsv"
+    params:
+        kraken_db = config['PARAMS']['KRAKEN']["KRAKEN_DB"]
+    log:
+        "logs/{run}/analysis/kraken_combine_reports.log"
+    benchmark:
+        "benchmarks/{run}/kraken_combine_reports.log"
+    run:
+        with tempfile.TemporaryDirectory(dir='data/combined_analysis') as temp_dir:
+            for file in input:
+                # shell("f={0}; zcat $f > {1}/${{f:0:(${{#f}}-11)}}".format(file, temp_dir))
+                shell("f=$(basename %s); zcat %s > %s/${{f:0:(${{#f}}-11)}}"
+                      % (file, file, temp_dir))
+            shell("""
+                  set +u; {KRAKEN_ENV}; set -u
+
+                  stdout=$(readlink -f {output.report})
+                  stderr=$(readlink -f {log})
+                  cd {temp_dir}
+                  kraken-mpa-report * \
+                    --db {params.kraken_db} \
+                    --header-line \
+                    1> $stdout \
+                    2> $stderr
+                  """)

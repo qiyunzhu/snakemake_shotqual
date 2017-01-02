@@ -1,11 +1,11 @@
 # how to install this workflow
 
 # make a conda env for kneaddata
-conda create -n kneaddata --yes python=3 pip pyyaml xlrd pandas jupyter notebook h5py
+conda create -n kneaddata --yes python=3 pip pyyaml xlrd pandas jupyter notebook h5py pigz
 
 # install kneaddata and dependencies
 source activate kneaddata
-conda install -c bioconda --yes bowtie2 fastqc trimmomatic diamond samtools bedtools glpk
+conda install -c bioconda --yes bowtie2 fastqc trimmomatic diamond samtools bedtools glpk kraken
 pip install snakemake multiqc kneaddata biom-format
 
 # download the kneaddata human genome database
